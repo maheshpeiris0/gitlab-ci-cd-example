@@ -1,0 +1,81 @@
+job_with_secrets:
+  image: alpine:latest
+  stage: setup
+  before_script:
+    - apk add --no-cache curl jq || true 
+    - |
+        HCP_API_TOKEN=$(curl --location "https://auth.idp.hashicorp.com/oauth2/token" \
+        --header "Content-Type: application/x-www-form-urlencoded" \
+        --data-urlencode "client_id=$HCP_CLIENT_ID" \
+        --data-urlencode "client_secret=$HCP_CLIENT_SECRET" \
+        --data-urlencode "grant_type=client_credentials" \
+        --data-urlencode "audience=https://api.hashicorp.cloud" | jq -r .access_token)
+    - |
+        SECRETS_JSON=$(curl \
+        --location "https://api.cloud.hashicorp.com/secrets/2023-06-13/organizations/44d1f69d-9255-44d3-bbf6-150c0127a5bf/projects/bceaf17b-7c81-4940-a574-4a2b00bc429c/apps/sample-app/open" \
+        --request GET \
+        --header "Authorization: Bearer $HCP_API_TOKEN" | jq .)
+
+    - export AWS_ACCESS_KEY_ID=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.name == "HCP_AWS_ACCESS_KEY_ID") | .version.value') 
+    - export AWS_SECRET_ACCESS_KEY=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.name == "HCP_AWS_SECRET_ACCESS_KEY") | .version.value') 
+    - export HCP_TF_USERNAME=$(echo $SECRETS_JSON | jq -r '.tf_username')
+    - export HCP_TF_PASSWORD=$(echo $SECRETS_JSON | jq -r '.tf_password')
+
+  script:
+    - echo "Use the secrets here or in any subsequent stages"
+
+
+image:
+  name: alpine:latest
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin/:/usr/local/bin:/usr/sbin/:/usr/bin:/sbin:/bin'
+    - 'TF_USERNAME=$TF_USERNAME'
+    - 'TF_PASSWORD=$TF_PASSWORD'
+
+before_script:
+  - apk add --update curl jq
+  - TERRAFORM_VERSION="1.7.5" 
+  - curl -O https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+  - unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip -d /usr/bin
+  - terraform --version
+  - rm -rf .terraform*
+  - terraform init -reconfigure -backend-config="password=${TF_PASSWORD}" 
+
+stages:
+  - setup
+  - validate
+  - plan 
+  - apply
+  - destroy
+
+syntaxcheck:
+  stage: validate 
+  script: 
+    - terraform validate
+
+dryrun:
+  stage: plan
+  script: 
+    - echo $AWS_ACCESS_KEY_ID
+    - terraform plan
+  dependencies:
+    - syntaxcheck
+
+deploy:
+  stage: apply
+  script:
+    - terraform apply -auto-approve
+  dependencies:
+    - dryrun
+
+destroy:
+  stage: destroy
+  environment:
+    name: $TF_STATE_NAME
+    action: stop
+  when: manual 
+  script:
+    - terraform destroy -auto-approve
+  dependencies:
+    - deploy
